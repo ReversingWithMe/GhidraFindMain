@@ -46,6 +46,7 @@ import ghidra.program.model.data.*;
 import ghidra.program.model.pcode.HighFunctionDBUtil;
 
 import ghidra.util.exception.InvalidInputException;
+import ghidra.util.exception.DuplicateNameException;
 
 public class FindMain extends GhidraScript {
 
@@ -66,7 +67,7 @@ public class FindMain extends GhidraScript {
 
         // Get handle to address for libc_start_main
         Address libcStartMainAddr = libcStartMainFunc.getEntryPoint();
-        println("Searching for calls to __libc_start_main at address: " + libcStartMainAddr);
+        println(" [INFO]  Searching for calls to __libc_start_main at address: " + libcStartMainAddr);
        
         // Iterate over all references to __libc_start_main and find calling functions
         ReferenceIterator references = referenceManager.getReferencesTo(libcStartMainAddr);
@@ -76,26 +77,26 @@ public class FindMain extends GhidraScript {
             Reference ref = references.next();
             if (ref.getReferenceType().isCall()) {
                 Address callAddr = ref.getFromAddress();
-                println("Call to __libc_start_main found at: " + callAddr);
+                println(" [INFO]  \tCall to __libc_start_main found at: " + callAddr);
                 
                 Function callingFunction = functionManager.getFunctionContaining(callAddr);
                 if (callingFunction != null) {
-                    println("In function: " + callingFunction.getName() + " at " + callingFunction.getEntryPoint());
+                    println(" [INFO]  \t\tIn function: " + callingFunction.getName() + " at " + callingFunction.getEntryPoint());
                     callingFunctions.add(callingFunction);
                 } else {
-                    println("No function containing address: " + callAddr);
+                    println(" [INFO]  \t\tNo function containing address: " + callAddr);
                 }
             }
         }
 
-        println("Calling functions of libc_start_main:");
+        println(" [INFO]  Calling functions of libc_start_main:");
         for (Function caller : callingFunctions) {
-            println("\t" + caller.getName());
+            println(" [INFO]  \t" + caller.getName());
         }
 
         // Decompile to gain access to parameters
         for (Function function : callingFunctions) {
-            println("Decompiling " + function.getName());
+            // println("[DEBUG]  Decompiling " + function.getName());
             HighFunction highFunction = ifc.decompileFunction(function, 30, monitor).getHighFunction();
             if (highFunction == null) {
                 continue;
@@ -122,15 +123,11 @@ public class FindMain extends GhidraScript {
                                 // If first argument is hard coded address
                                 Address mainAddress = firstArg.getAddress();
                                 Function mainFunc = functionManager.getFunctionAt(mainAddress);
-                                println("Main address at " + mainAddress);
-                                if (mainFunc != null) {
-                                    try {
-                                        mainFunc.setName("main", SourceType.USER_DEFINED);
-                                        updateMainFunctionParameters(ifc, mainFunc);
-                                        println("Renamed function at " + mainAddress + " to 'main'");
-                                    } catch (InvalidInputException e) {
-                                        println("Failed to rename function: " + e.getMessage());
-                                    }
+                                // println("Main address at " + mainAddress);
+                                if (mainFunc != null && !mainFunc.getName().equals("main")) {
+                                    updateMainFunction(ifc, mainFunc);
+                                } else if (mainFunc.getName().equals("main")) {
+                                    println(" [INFO]  Main function already exists at " + mainFunc.getEntryPoint());
                                 }
                             } else if (firstArg.isUnique()) {
                                 // If first argument is a unique varnode.
@@ -145,14 +142,12 @@ public class FindMain extends GhidraScript {
                                 Function mainFunc = functionManager.getFunctionAt(mainAddress);
 
                                 // A function exists at this address
-                                if (mainFunc != null) {
-                                    try {
-                                        mainFunc.setName("main", SourceType.USER_DEFINED);
-                                        updateMainFunctionParameters(ifc, mainFunc);
-                                        println("Renamed function at " + mainAddress + " to 'main'");
-                                    } catch (InvalidInputException e) {
-                                        println("Failed to rename function: " + e.getMessage());
-                                    }
+                                if (mainFunc != null && !mainFunc.getName().equals("main")) {
+                                    println("[ERROR]  " + mainFunc.getName());
+                                    updateMainFunction(ifc, mainFunc);
+                                    return;
+                                } else if (mainFunc.getName().equals("main")) {
+                                    println(" [INFO]  Main function already exists at " + mainFunc.getEntryPoint());
                                 }
                             } else {
                                 println("Function not found at address: ");
@@ -162,8 +157,6 @@ public class FindMain extends GhidraScript {
                 }
             }
         }
-
-        println("Finished searching for __libc_start_main function calls.");
     }
 
     private Function getFunctionByName(FunctionManager functionManager, String functionName) {
@@ -192,7 +185,25 @@ public class FindMain extends GhidraScript {
         return ifc;
     }
 
-    private void updateMainFunctionParameters(DecompInterface ifc, Function mainFunc) {
+    private void updateMainFunction(DecompInterface ifc, Function mainFunc) {
+        goTo(mainFunc.getEntryPoint());
+        
+        // Ask User before just doing stuff.
+        boolean userResponse = askYesNo("Update Main Prompt", "Would you like to create `main` function at " + mainFunc.getEntryPoint() + "?\nCurrently named " + mainFunc.getName());
+        if (!userResponse) {
+            return;
+        }
+
+        try {
+            mainFunc.setName("main", SourceType.USER_DEFINED);
+            println(" [INFO]  Renamed function at " + mainFunc.getEntryPoint() + " to 'main'");
+        } catch (InvalidInputException e) {
+            println("[ERROR]  Failed to rename function: " + e.getMessage());
+        } catch (DuplicateNameException e) {
+            // This should never be hit due to check before running this function.
+            println("[ERROR]  A functuion name main already exists: " + e.getMessage());
+        }
+        
         try {
             HighFunction highFunction = ifc.decompileFunction(mainFunc, 30, monitor).getHighFunction();
             HighFunctionDBUtil.commitParamsToDatabase(highFunction, true, SourceType.ANALYSIS);
@@ -200,7 +211,7 @@ public class FindMain extends GhidraScript {
             // Get existing parameters
             Parameter[] existingParams = mainFunc.getParameters();
             if (existingParams.length < 2) {
-                println("Main function does not have the expected number of parameters.");
+                println(" [INFO]  Main function does not have the expected number of parameters.");
                 return;
             }
             
@@ -218,9 +229,9 @@ public class FindMain extends GhidraScript {
             existingParams[1].setDataType(charPointerPointerType, SourceType.USER_DEFINED);
             existingParams[1].setName("argv", SourceType.USER_DEFINED);
             
-            println("Updated function parameters for 'main'");
+            println(" [INFO]  Updated function parameters for 'main'");
         } catch (Exception e) {
-            println("Failed to update function parameters for main: " + e.getMessage());
+            println("[ERROR]  Failed to update function parameters for main: " + e.getMessage());
         }
     }
 }
